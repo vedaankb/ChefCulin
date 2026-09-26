@@ -80,6 +80,18 @@ function runQuery(db, sql, params = []) {
   return rowsFrom(stmt)
 }
 
+/** Hold/excluded stay in the file; the lens only reads the active canon. */
+const ACTIVE_SQL = "COALESCE(canon_status, 'active') = 'active'"
+const UR_ACTIVE_SQL = "COALESCE(ur.canon_status, 'active') = 'active'"
+
+function isConfidenceAssessed(row) {
+  const state = String(row?.lens_confidence_state || '').toLowerCase()
+  if (state.startsWith('assessed')) return true
+  if (state.includes('pending') || state.includes('unrated')) return false
+  const conf = String(row?.confidence || '').trim()
+  return Boolean(conf) && conf.toLowerCase() !== 'pending'
+}
+
 /**
  * Search use_records. All filters optional; empty query returns a small sample.
  * @param {{ cuisine?: string, source_thread?: string, item_type?: string, keyword?: string, limit?: number }} query
@@ -123,7 +135,8 @@ export async function searchDishes(query = {}) {
     params.push(k, k, k, k, k)
   }
 
-  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+  where.push(ACTIVE_SQL)
+  const whereSql = `WHERE ${where.join(' AND ')}`
   params.push(Math.min(Math.max(Number(limit) || 24, 1), 100))
 
   return runQuery(
@@ -148,20 +161,34 @@ export async function searchDishes(query = {}) {
 export async function listCompanions(dishId) {
   if (!dishId) return []
   const db = await getDb()
-  return runQuery(
+  const rows = runQuery(
     db,
     `
     SELECT
       companion_id, dish_id, record_id, cuisine,
       ingredient_name, ingredient_category, role_in_dish,
       is_optional, use_priority, traditional_fit,
-      preparation_note, region_or_context
+      preparation_note, region_or_context,
+      spine_id, spine_match_basis
     FROM companion_ingredients
     WHERE dish_id = ?
     ORDER BY use_priority ASC, ingredient_name ASC
     `,
     [dishId]
   )
+  // Member-level resolution at read time — never collapse garlic onto culin:leek alone.
+  const { resolveIngredient } = await import('./spineResolve.js')
+  return rows.map((row) => {
+    const r = resolveIngredient(row.ingredient_name)
+    return {
+      ...row,
+      spine_id: row.spine_id || (r.state === 'resolved' ? r.spine_id : null),
+      spine_member: r.state === 'resolved' ? r.spine_member : null,
+      member_id: r.state === 'resolved' ? r.member_id : null,
+      spine_display: r.state === 'resolved' ? r.display : row.ingredient_name,
+      spine_state: r.state,
+    }
+  })
 }
 
 /**
@@ -184,7 +211,7 @@ export async function getDishDetail(id = {}) {
   return {
     ...record,
     companions,
-    companionIngredients: companions.map((c) => c.ingredient_name),
+    companionIngredients: companions.map((c) => c.spine_display || c.ingredient_name),
   }
 }
 
@@ -196,7 +223,8 @@ export async function listCuisines() {
     `
     SELECT cuisine, COUNT(*) AS dish_count
     FROM use_records
-    WHERE cuisine IS NOT NULL AND TRIM(cuisine) != ''
+    WHERE ${ACTIVE_SQL}
+      AND cuisine IS NOT NULL AND TRIM(cuisine) != ''
     GROUP BY cuisine
     ORDER BY dish_count DESC, cuisine ASC
     `
@@ -215,8 +243,9 @@ export async function listRegionPicks({ limit = 24 } = {}) {
     `
     SELECT country, cuisine, COUNT(*) AS dish_count
     FROM use_records
-    WHERE (country IS NOT NULL AND TRIM(country) != '')
-       OR (cuisine IS NOT NULL AND TRIM(cuisine) != '')
+    WHERE ${ACTIVE_SQL}
+      AND ((country IS NOT NULL AND TRIM(country) != '')
+       OR (cuisine IS NOT NULL AND TRIM(cuisine) != ''))
     GROUP BY country, cuisine
     ORDER BY dish_count DESC, country ASC, cuisine ASC
     LIMIT ?
@@ -262,7 +291,7 @@ export async function matchTraditionRegion(raw) {
     `
     SELECT country, cuisine, region_or_community, COUNT(*) AS dish_count
     FROM use_records
-    WHERE ${clause}
+    WHERE ${ACTIVE_SQL} AND (${clause})
     GROUP BY country, cuisine, region_or_community
     ORDER BY dish_count DESC
     LIMIT 1
@@ -309,7 +338,8 @@ export async function getTraditionAssociation(seed, opts = {}) {
       ON ci1.dish_id = ci2.dish_id
       AND LOWER(ci1.ingredient_name) != LOWER(ci2.ingredient_name)
     JOIN use_records ur ON ur.dish_id = ci1.dish_id
-    WHERE LOWER(ci1.ingredient_name) = LOWER(?)
+    WHERE ${UR_ACTIVE_SQL}
+      AND LOWER(ci1.ingredient_name) = LOWER(?)
     GROUP BY ci2.ingredient_name, ur.source_thread, ur.cuisine, ur.country, ur.region_or_community
     ORDER BY dish_count DESC, name ASC
     LIMIT ?
@@ -351,7 +381,8 @@ export async function getTraditionAssociation(seed, opts = {}) {
       GROUP_CONCAT(DISTINCT ci.ingredient_name) AS ingredients
     FROM use_records ur
     JOIN companion_ingredients ci ON ci.dish_id = ur.dish_id
-    WHERE ur.dish_id IN (
+    WHERE ${UR_ACTIVE_SQL}
+      AND ur.dish_id IN (
       SELECT DISTINCT dish_id FROM companion_ingredients WHERE LOWER(ingredient_name) = LOWER(?)
     )
     GROUP BY ur.source_thread, ur.cuisine, ur.country, ur.region_or_community
@@ -447,8 +478,8 @@ function rowToOption(row) {
     dish_id: row.dish_id,
     // Pending means unassessed, not low. A lens that renders the two the same
     // way lies about what it knows (§2.6).
-    confidence: row.confidence || 'Pending',
-    confidenceIsAssessed: Boolean(row.confidence),
+    confidence: isConfidenceAssessed(row) ? row.confidence : 'Pending',
+    confidenceIsAssessed: isConfidenceAssessed(row),
     sourceCount: Number(row.source_count) || 0,
   }
 }
@@ -470,21 +501,87 @@ export function plateTokensFromNames(focusName, plateNames = []) {
   return traditionSearchTokens(plateNames).filter((t) => !focusSet.has(t))
 }
 
+/**
+ * "olive" must not qualify a dish via "olive oil". Role gating alone is not
+ * enough — a few oil rows are tagged `ingredient`. If the chef typed oil/fat
+ * as the focus, keep medium names and include the `fat` role so oil-as-medium
+ * dishes actually surface.
+ */
+export function isOilMediumName(name) {
+  const s = String(name || '').toLowerCase().trim()
+  return s === 'oil' || /\boil\b/.test(s) || s.includes(' oil')
+}
+
+/** Multi-word / qualified oil (olive oil), not the bare token "oil". */
+export function isSpecificOilPhrase(name) {
+  const s = String(name || '').toLowerCase().trim()
+  return s !== 'oil' && s !== 'fat' && isOilMediumName(s)
+}
+
+/** Focus is itself a cooking fat/oil — not a fruit or protein cooked *in* one. */
+export function isFatMediumFocus(name) {
+  const s = String(name || '').toLowerCase().trim()
+  if (!s) return false
+  if (isOilMediumName(s)) return true
+  return /\b(butter|ghee|lard|tallow|schmaltz|dripping|shortening)\b/.test(s) || s === 'fat'
+}
+
+/**
+ * Fruit/aromatic focus → FOCUS_ROLES only.
+ * Oil/butter/ghee focus → also allow `fat` so medium rows match.
+ */
+export function rolesForFocus(focusName, override = null) {
+  if (override != null) return override
+  if (isFatMediumFocus(focusName)) return [...FOCUS_ROLES, 'fat']
+  return FOCUS_ROLES
+}
+
+/**
+ * For "olive oil", drop the bare "olive" token so fruit dishes do not ride along.
+ * Prefer specific oil phrases over a lone "oil" token (avoids sesame/walnut bleed).
+ */
+export function focusSearchTokens(focusName) {
+  const tokens = traditionSearchTokens([focusName])
+  if (!isFatMediumFocus(focusName)) return tokens
+  const kept = tokens.filter(
+    (t) => isOilMediumName(t) || isFatMediumFocus(t) || t === 'oil' || t === 'fat'
+  )
+  const specificOils = kept.filter((t) => isSpecificOilPhrase(t))
+  if (specificOils.length) return specificOils
+  return kept.length ? kept : tokens
+}
+
+function companionFocusMatchSql(roles) {
+  const role = focusRoleClause(roles)
+  // Params per token after the three LIKEs: role…, then the token itself for the oil gate.
+  return {
+    sql:
+      `(LOWER(COALESCE(ci.ingredient_name,'')) LIKE ? AND ${role.sql}` +
+      ` AND (? LIKE '%oil%' OR (` +
+      `LOWER(COALESCE(ci.ingredient_name,'')) NOT LIKE '% oil%'` +
+      ` AND LOWER(COALESCE(ci.ingredient_name,'')) NOT LIKE '%oil %'` +
+      ` AND LOWER(COALESCE(ci.ingredient_name,'')) NOT LIKE 'oil%'` +
+      `)))`,
+    roleParams: role.params,
+  }
+}
+
 function tokenWhereClause(tokens, roles = FOCUS_ROLES) {
   if (!tokens.length) return { sql: '1=0', params: [] }
   // The companion arm is role-gated: matching on ci.ingredient_name alone is
   // what let a dish qualify because it is FRIED IN the queried ingredient.
-  const role = focusRoleClause(roles)
+  const companion = companionFocusMatchSql(roles)
   const whereLikes = tokens
     .map(
       () =>
         `(LOWER(ur.item) LIKE ? OR LOWER(COALESCE(ur.use_or_dish,'')) LIKE ?` +
-        ` OR (LOWER(COALESCE(ci.ingredient_name,'')) LIKE ? AND ${role.sql}))`
+        ` OR ${companion.sql})`
     )
     .join(' OR ')
   const params = tokens.flatMap((t) => {
     const like = `%${t}%`
-    return [like, like, like, ...role.params]
+    const tokenLower = String(t).toLowerCase()
+    return [like, like, like, ...companion.roleParams, tokenLower]
   })
   return { sql: `(${whereLikes})`, params }
 }
@@ -497,11 +594,12 @@ function tokenWhereClause(tokens, roles = FOCUS_ROLES) {
  * seasoning — not the rows where olive oil is the cooking medium. Without this
  * filter "olive" returns olive oil, which was the original test failure. `fat`
  * and `garnish` are excluded from the focus match for that reason; they remain
- * perfectly valid companion rows once a dish is opened.
+ * perfectly valid companion rows once a dish is opened. Oil/butter as *focus*
+ * re-opens `fat` via rolesForFocus.
  */
 export const FOCUS_ROLES = ['main', 'seasoning', 'aromatic', 'ingredient']
 
-/** Roles a focus match must NOT be carried by alone. */
+/** Roles a focus match must NOT be carried by alone (unless focus is that medium). */
 export const MEDIUM_ROLES = ['fat', 'garnish']
 
 function focusRoleClause(roles = FOCUS_ROLES) {
@@ -551,10 +649,14 @@ function queryTraditionRows(
       ur.traditionality_score,
       ur.source_thread,
       ur.region_or_community,
+      ur.confidence,
+      ur.lens_confidence_state,
+      (SELECT COUNT(*) FROM sources sx WHERE sx.dish_id = ur.dish_id AND sx.is_dish_specific = 1) AS source_count,
       COUNT(DISTINCT CASE WHEN ${plateHits.sql} THEN LOWER(ci.ingredient_name) END) AS plate_hits
     FROM use_records ur
     LEFT JOIN companion_ingredients ci ON ci.dish_id = ur.dish_id
-    WHERE ${focus.sql}
+    WHERE ${UR_ACTIVE_SQL}
+      AND ${focus.sql}
     ${cuisineSql}
     GROUP BY ur.record_id
     ORDER BY plate_hits DESC, COALESCE(ur.traditionality_score, -1) DESC, ur.item ASC
@@ -577,15 +679,16 @@ export async function bestTraditionMatches({
   cuisine = null,
   cuisineScope = null,
   limit = 5,
-  roles = FOCUS_ROLES,
+  roles = null,
 } = {}) {
   const db = await getDb()
   const focusName = focus || names[0]
   if (!focusName) return []
 
   const plateNames = focus != null ? names.filter((n) => n !== focusName) : names.slice(1)
-  const focusTokens = traditionSearchTokens([focusName])
+  const focusTokens = focusSearchTokens(focusName)
   const plateTokens = plateTokensFromNames(focusName, plateNames)
+  const matchRoles = rolesForFocus(focusName, roles)
   const cap = Math.min(Math.max(Number(limit) || 5, 1), 12)
   if (!focusTokens.length) return []
 
@@ -609,7 +712,7 @@ export async function bestTraditionMatches({
       cuisineTerms: cuisineFilter,
       limit: n,
       excludeIds,
-      roles,
+      roles: matchRoles,
     })
 
   let options = take(query(cuisineTerms, cap))

@@ -11,6 +11,12 @@ vi.mock('../api.js', () => ({
   techniques: vi.fn(),
 }))
 
+vi.mock('../lib/traditionDb.js', () => ({
+  listRegionPicks: vi.fn(async () => []),
+  matchTraditionRegion: vi.fn(async () => null),
+  bestTraditionMatches: vi.fn(async () => []),
+}))
+
 function Harness() {
   const { addIngredient, commitForm, removeAt } = useWorkspace()
   return (

@@ -14,6 +14,7 @@ import {
   MIN_HEALTH,
   RECIPE_NLG_HEURISTIC,
   TRADITION_ANCHORS,
+  VCF_COMPOUND_ANCHORS,
 } from './anchors.js'
 
 function sortedDesc(rows, key) {
@@ -52,6 +53,16 @@ export async function checkCompoundAnchors(api) {
   const results = []
   for (const anchor of COMPOUND_ANCHORS) {
     const res = await api.compound(anchor.focus, 16)
+    // Skip flavor-network anchors when the API is on the VCF pairs path.
+    if (res.source === 'pairs') {
+      results.push({
+        id: `compound.flavor_network.${anchor.token}`,
+        label: `Flavor-network anchors skipped (compound_source=pairs)`,
+        ok: true,
+        detail: 'CULIN_COMPOUND_SOURCE=pairs — see VCF compound anchors',
+      })
+      continue
+    }
     const rows = res.results || []
     const tokens = namesLower(rows, 'ingredient')
     const displays = namesLower(rows, 'display')
@@ -79,6 +90,40 @@ export async function checkCompoundAnchors(api) {
       label: `Compound neighbors for ${anchor.focus}`,
       ok: fails.length === 0,
       detail: fails.join('; ') || `top=${rows[0]?.display || rows[0]?.ingredient}`,
+    })
+  }
+  return results
+}
+
+export async function checkVcfCompoundAnchors(api) {
+  const results = []
+  for (const anchor of VCF_COMPOUND_ANCHORS) {
+    const res = await api.vcfPairs({
+      spineId: anchor.spineId,
+      productId: anchor.productId,
+      n: 16,
+    })
+    const rows = res.results || []
+    const names = rows.map((r) => String(r.match_raw_name || '').toLowerCase())
+    const fails = []
+    if (rows.length < anchor.minNeighbors) {
+      fails.push(`only ${rows.length} neighbors (need ${anchor.minNeighbors})`)
+    }
+    if (anchor.mustIncludeAny?.length) {
+      const hit = anchor.mustIncludeAny.some((tok) => names.some((n) => n.includes(tok)))
+      if (!hit) fails.push(`missing any of ${anchor.mustIncludeAny.join('/')}`)
+    }
+    for (const bad of anchor.forbidTokens || []) {
+      if (names.some((n) => n.includes(bad))) fails.push(`forbidden ${bad}`)
+    }
+    if (res.scope && res.scope !== 'product' && anchor.productId != null) {
+      fails.push(`expected product scope, got ${res.scope}`)
+    }
+    results.push({
+      id: `vcf.compound.${anchor.focus.toLowerCase()}`,
+      label: `VCF pairs for ${anchor.focus}`,
+      ok: fails.length === 0,
+      detail: fails.join('; ') || `top=${rows[0]?.match_raw_name}`,
     })
   }
   return results

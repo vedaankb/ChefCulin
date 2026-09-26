@@ -32,6 +32,29 @@ export const COMPOUND_ANCHORS = [
   },
 ]
 
+/**
+ * VCF compound layer — live API anchors (§2.3). Coffee's top matches are roasted
+ * Maillard products, not beverages. Garlic is member-scoped (culin:leek #209).
+ */
+export const VCF_COMPOUND_ANCHORS = [
+  {
+    focus: 'Coffee',
+    spineId: 'culin:coffee',
+    productId: 157,
+    minNeighbors: 5,
+    mustIncludeAny: ['pork', 'hazelnut', 'malt', 'cocoa', 'bread', 'wheat'],
+    forbidTokens: ['beer', 'black tea', 'white wine'],
+  },
+  {
+    focus: 'Garlic',
+    spineId: 'culin:leek',
+    productId: 209,
+    minNeighbors: 3,
+    mustIncludeAny: [],
+    forbidTokens: ['white wine', 'beer'],
+  },
+]
+
 /** Co-occurrence lens — RecipeNLG NPMI artifacts. */
 export const COOCCUR_ANCHORS = [
   {

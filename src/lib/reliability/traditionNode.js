@@ -2,7 +2,12 @@
  * Tradition reliability checks via Node-loaded SQLite (no Vite wasm path).
  */
 import { openTraditionDb } from '../agentTestHelpers.js'
-import { cuisineSearchTerms, traditionSearchTokens } from '../traditionDb.js'
+import {
+  FOCUS_ROLES,
+  cuisineSearchTerms,
+  focusSearchTokens,
+  rolesForFocus,
+} from '../traditionDb.js'
 import { TRADITION_ANCHORS } from './anchors.js'
 
 function runQuery(db, sql, params = []) {
@@ -23,20 +28,30 @@ function runQuery(db, sql, params = []) {
 }
 
 async function bestMatches(db, { names, cuisine = null, limit = 5 }) {
-  const tokens = traditionSearchTokens(names)
+  const focusName = names[0]
+  const tokens = focusSearchTokens(focusName)
   if (!tokens.length) return []
+  const matchRoles = rolesForFocus(focusName)
   const cuisineTerms = cuisine ? cuisineSearchTerms(cuisine) : []
+  const rolePlaceholders = matchRoles.map(() => '?').join(', ')
+  const roleSql = `LOWER(COALESCE(ci.role_in_dish,'')) IN (${rolePlaceholders})`
   const hitLikes = tokens.map(() => "LOWER(COALESCE(ci.ingredient_name,'')) LIKE ?").join(' OR ')
   const whereLikes = tokens
     .map(
       () =>
-        `(LOWER(ur.item) LIKE ? OR LOWER(COALESCE(ur.use_or_dish,'')) LIKE ? OR LOWER(COALESCE(ci.ingredient_name,'')) LIKE ?)`
+        `(LOWER(ur.item) LIKE ? OR LOWER(COALESCE(ur.use_or_dish,'')) LIKE ?` +
+        ` OR (LOWER(COALESCE(ci.ingredient_name,'')) LIKE ? AND ${roleSql}` +
+        ` AND (? LIKE '%oil%' OR (` +
+        `LOWER(COALESCE(ci.ingredient_name,'')) NOT LIKE '% oil%'` +
+        ` AND LOWER(COALESCE(ci.ingredient_name,'')) NOT LIKE '%oil %'` +
+        ` AND LOWER(COALESCE(ci.ingredient_name,'')) NOT LIKE 'oil%'` +
+        `))))`
     )
     .join(' OR ')
   const hitParams = tokens.map((t) => `%${t}%`)
   const whereParams = tokens.flatMap((t) => {
     const like = `%${t}%`
-    return [like, like, like]
+    return [like, like, like, ...matchRoles.map((r) => r.toLowerCase()), String(t).toLowerCase()]
   })
   let cuisineSql = ''
   const cuisineParams = []
@@ -53,7 +68,8 @@ async function bestMatches(db, { names, cuisine = null, limit = 5 }) {
       COUNT(DISTINCT CASE WHEN (${hitLikes}) THEN LOWER(ci.ingredient_name) END) AS plate_hits
     FROM use_records ur
     LEFT JOIN companion_ingredients ci ON ci.dish_id = ur.dish_id
-    WHERE (${whereLikes})
+    WHERE COALESCE(ur.canon_status, 'active') = 'active'
+      AND (${whereLikes})
     ${cuisineSql}
     GROUP BY ur.record_id
     ORDER BY plate_hits DESC, ur.traditionality_score DESC, ur.item ASC
@@ -107,7 +123,9 @@ export async function checkTraditionAssociationNode() {
     FROM companion_ingredients ci1
     JOIN companion_ingredients ci2
       ON ci1.dish_id = ci2.dish_id AND LOWER(ci1.ingredient_name) != LOWER(ci2.ingredient_name)
-    WHERE LOWER(ci1.ingredient_name) = LOWER(?)
+    JOIN use_records ur ON ur.dish_id = ci1.dish_id
+    WHERE COALESCE(ur.canon_status, 'active') = 'active'
+      AND LOWER(ci1.ingredient_name) = LOWER(?)
     GROUP BY ci2.ingredient_name
     ORDER BY dish_count DESC
     LIMIT 12
@@ -122,6 +140,7 @@ export async function checkTraditionAssociationNode() {
     WHERE ur.dish_id IN (
       SELECT DISTINCT dish_id FROM companion_ingredients WHERE LOWER(ingredient_name) = LOWER(?)
     )
+      AND COALESCE(ur.canon_status, 'active') = 'active'
     GROUP BY ur.source_thread, ur.cuisine
     ORDER BY dish_count DESC
     LIMIT 8
@@ -147,7 +166,8 @@ export async function checkRegionPicksNode() {
     `
     SELECT country, cuisine, COUNT(*) AS dish_count
     FROM use_records
-    WHERE country IS NOT NULL AND TRIM(country) != ''
+    WHERE COALESCE(canon_status, 'active') = 'active'
+      AND country IS NOT NULL AND TRIM(country) != ''
     GROUP BY country, cuisine
     ORDER BY dish_count DESC
     LIMIT 10
@@ -165,7 +185,10 @@ export async function checkRegionPicksNode() {
 
 export async function checkTraditionScaleNode() {
   const db = await openTraditionDb()
-  const [{ c }] = runQuery(db, 'SELECT COUNT(*) AS c FROM use_records')
+  const [{ c }] = runQuery(
+    db,
+    "SELECT COUNT(*) AS c FROM use_records WHERE COALESCE(canon_status, 'active') = 'active'"
+  )
   const fails = []
   if (c < 200) fails.push(`only ${c} use_records`)
   return {
@@ -225,7 +248,8 @@ export function makeTraditionDbNode() {
           ON ci1.dish_id = ci2.dish_id
           AND LOWER(ci1.ingredient_name) != LOWER(ci2.ingredient_name)
         JOIN use_records ur ON ur.dish_id = ci1.dish_id
-        WHERE LOWER(ci1.ingredient_name) = LOWER(?)
+        WHERE COALESCE(ur.canon_status, 'active') = 'active'
+          AND LOWER(ci1.ingredient_name) = LOWER(?)
         GROUP BY ci2.ingredient_name, ur.source_thread, ur.cuisine, ur.country, ur.region_or_community
         ORDER BY dish_count DESC, name ASC
         LIMIT ?
@@ -269,6 +293,7 @@ export function makeTraditionDbNode() {
         WHERE ur.dish_id IN (
           SELECT DISTINCT dish_id FROM companion_ingredients WHERE LOWER(ingredient_name) = LOWER(?)
         )
+          AND COALESCE(ur.canon_status, 'active') = 'active'
         GROUP BY ur.source_thread, ur.cuisine, ur.country, ur.region_or_community
         ORDER BY COUNT(DISTINCT ur.dish_id) DESC
         LIMIT 12

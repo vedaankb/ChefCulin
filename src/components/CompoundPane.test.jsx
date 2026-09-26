@@ -3,10 +3,13 @@ import { cleanup, render, screen, waitFor, fireEvent } from '@testing-library/re
 import { WorkspaceProvider } from '../context/WorkspaceContext.jsx'
 import CompoundPane from './CompoundPane.jsx'
 
-const vcfPairs = vi.fn(async () => ({
-  spine_id: 'culin:coffee',
+const vcfPairs = vi.fn(async (opts = {}) => ({
+  spine_id: opts.spineId || 'culin:coffee',
+  product_id: opts.productId || 157,
+  scope: opts.productId != null ? 'product' : 'spine',
   source: 'pairs',
   count: 1,
+  mixed_profile_source_count: 0,
   results: [
     {
       match_vcf_product_id: 400,
@@ -16,14 +19,12 @@ const vcfPairs = vi.fn(async () => ({
       shared_count: 255,
       top_shared_compounds: [
         { compound_id: 'x', raw_compound: '2-methylpyrazine', compound_group: 'Bases', df_culinary: 40, idf: 2.6 },
-        { compound_id: 'y', raw_compound: 'furfural', compound_group: 'Furans', df_culinary: 12, idf: 3.8 },
+        { compound_id: 'y', raw_compound: 'furfural', compound_group: 'Furans', df_culinary: 12, idf: 3.8, descriptors: ['bready'] },
       ],
     },
   ],
 }))
 
-// WorkspaceContext pulls in traditionDb.js -> sql.js, whose ?url imports do not
-// resolve under vitest. Stubbed the way the other component tests stub it.
 vi.mock('../lib/traditionDb.js', async () => {
   const { traditionDbTestStub } = await import('../lib/traditionDb.testStub.js')
   return traditionDbTestStub
@@ -53,16 +54,17 @@ afterEach(() => {
 })
 
 describe('CompoundPane — reads the VCF compound layer', () => {
-  it('resolves the seed to a spine id before fetching', async () => {
+  it('resolves the seed to a product id before fetching', async () => {
     renderPane('Coffee')
     await waitFor(() => expect(vcfPairs).toHaveBeenCalled())
-    expect(vcfPairs.mock.calls[0][0]).toMatch(/^culin:/)
+    const arg = vcfPairs.mock.calls[0][0]
+    expect(arg.spineId).toMatch(/^culin:/)
+    expect(arg.productId).toEqual(expect.any(Number))
   })
 
   it('names the compound families rather than the score', async () => {
     renderPane('Coffee')
     expect(await screen.findByText(/pyrazines and pyridines/)).toBeTruthy()
-    // The similarity score is not something a chef can verify — it is not shown.
     expect(screen.queryByText(/0\.187/)).toBeNull()
   })
 
@@ -78,6 +80,14 @@ describe('CompoundPane — reads the VCF compound layer', () => {
   it('discloses the source', async () => {
     renderPane('Coffee')
     expect(await screen.findByText(/Volatile Compounds in Food/)).toBeTruthy()
+  })
+
+  it('fetches garlic at member scope, not the allium cluster', async () => {
+    renderPane('Garlic')
+    await waitFor(() => expect(vcfPairs).toHaveBeenCalled())
+    const arg = vcfPairs.mock.calls[0][0]
+    expect(arg.spineId).toBe('culin:leek')
+    expect(arg.productId).toBe(209)
   })
 
   it('says so plainly when the seed is not in the corpus', async () => {

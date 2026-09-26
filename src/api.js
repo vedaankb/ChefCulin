@@ -53,14 +53,31 @@ export async function cooccur(ingredient, n = 20) {
   return get('/cooccur', { ingredient, n })
 }
 
-/** Flavor-network shared-compound neighbors (Ahn / FooDB projection). */
-export async function compound(ingredient, n = 24) {
-  return get('/compound', { ingredient, n })
+/**
+ * Compound lens dispatcher. Behind CULIN_COMPOUND_SOURCE on the API:
+ * pairs (VCF) or flavor_network. Prefer product_id for member-level VCF.
+ */
+export async function compound(ingredient, n = 24, opts = {}) {
+  return get('/compound', {
+    ingredient,
+    n,
+    spine_id: opts.spineId,
+    product_id: opts.productId,
+  })
 }
 
-/** VCF compound layer — shared-compound neighbours for one spine entry (§2.3). */
-export async function vcfPairs(spineId, n = 24) {
-  return get('/vcf/pairs', { spine_id: spineId, n })
+/**
+ * VCF compound layer — prefer productId (member) over spineId (cluster).
+ * @param {{ spineId?: string, productId?: number, n?: number, sameSourceOnly?: boolean }} opts
+ */
+export async function vcfPairs(opts = {}) {
+  const { spineId = null, productId = null, n = 24, sameSourceOnly = false } = opts
+  return get('/vcf/pairs', {
+    spine_id: spineId,
+    product_id: productId,
+    n,
+    same_source_only: sameSourceOnly ? 1 : 0,
+  })
 }
 
 /** VCF form diffs for one spine entry, with an explicit coverage state (§2.4). */
@@ -73,11 +90,39 @@ export async function vcfPhase(productId, { against = null, n = 24 } = {}) {
   return get('/vcf/phase', { product_id: productId, against, n })
 }
 
+/** Dish-level phase frames (dominant_bucket across the plate). */
+export async function vcfPhaseDish(productIds = []) {
+  return get('/vcf/phase/dish', { product_ids: productIds.join(',') })
+}
+
 /** Counts and provenance for the VCF tables — used by lens disclosure (§2.7). */
 export async function vcfMeta() {
   return get('/vcf/meta')
 }
 
+/** ICD-10-CM search via NLM (proxied). Riverside Health lens. */
+export async function icdSearch(q, n = 20) {
+  return get('/icd/search', { q, n })
+}
+
+/** MeSH disease associations for an ingredient's compounds. */
+export async function healthDiseases(ingredient, n = 40) {
+  return get('/health/diseases', { ingredient, n })
+}
+
+/**
+ * Condition/ICD name → MeSH name-match → suggested culinary ingredients.
+ * @param {{ name: string, code?: string, n?: number, exclude?: string[] }} opts
+ */
+export async function healthByCondition(opts = {}) {
+  const { name, code = null, n = 24, exclude = [] } = opts
+  return get('/health/by-condition', {
+    name,
+    code,
+    n,
+    exclude: exclude.length ? exclude.join(',') : undefined,
+  })
+}
 
 export async function techniques(ingredient, n = 10) {
   return get('/techniques', { ingredient, n })

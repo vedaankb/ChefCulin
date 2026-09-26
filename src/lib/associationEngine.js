@@ -2,6 +2,7 @@ import { FRAMES } from '../data/domain.js'
 import * as defaultApi from '../api.js'
 import * as defaultTraditionDb from './traditionDb.js'
 import { plateSeed } from './plateSeed.js'
+import { resolveIngredient } from './spineResolve.js'
 import { matchRecipeNlg } from './matchRecipeNlg.js'
 import { getFrame } from './frameRegistry.js'
 
@@ -61,7 +62,7 @@ const nameOf = (d) => (typeof d === 'string' ? d : d?.name)
 const dishNames = (dish) => (dish || []).map(nameOf).filter(Boolean)
 
 /**
- * Compound lens — flavor-network neighbors ranked by shared volatile compounds.
+ * Compound lens — VCF shared-compound neighbours (member-scoped when resolved).
  */
 export async function collectCompound(dish, focusIngredient = null, options = {}) {
   const apiClient = options.api || defaultApi
@@ -72,23 +73,62 @@ export async function collectCompound(dish, focusIngredient = null, options = {}
   if (!display) return []
 
   try {
-    const res = await apiClient.compound(display, options.limit || 24)
+    const r = resolveIngredient(display)
+    let res
+    if (r.state === 'resolved' && r.member_id != null && apiClient.vcfPairs) {
+      res = await apiClient.vcfPairs({
+        productId: r.member_id,
+        spineId: r.spine_id,
+        n: options.limit || 24,
+      })
+      return (res.results || [])
+        .filter((row) => {
+          const label = String(row.match_raw_name || '')
+            .replace(/\s*\([^)]*\)/g, '')
+            .trim()
+          return label && !haveLower.has(label.toLowerCase()) && !have.has(label)
+        })
+        .map((row) => {
+          const label = String(row.match_raw_name || '')
+            .replace(/\s*\([A-Z][a-z]+ (?:[a-z]+|species)[^)]*\)/g, '')
+            .trim()
+            .toLowerCase()
+            .replace(/\b\w/g, (c) => c.toUpperCase())
+          return {
+            name: label,
+            lens: 'compound',
+            reason: `${row.shared_count || 0} shared compounds`,
+            meta: {
+              shared_count: row.shared_count,
+              mixed_profile_source: row.mixed_profile_source,
+              network: row.match_raw_name,
+              engaged: false,
+              hits: 0,
+            },
+          }
+        })
+    }
+
+    res = await apiClient.compound(display, options.limit || 24)
     return (res.results || [])
       .filter(
-        (r) =>
-          !have.has(r.display) &&
-          !have.has(r.ingredient) &&
-          !haveLower.has(String(r.display || '').toLowerCase()) &&
-          !haveLower.has(String(r.ingredient || '').toLowerCase())
+        (row) =>
+          !have.has(row.display) &&
+          !have.has(row.ingredient) &&
+          !haveLower.has(String(row.display || '').toLowerCase()) &&
+          !haveLower.has(String(row.ingredient || '').toLowerCase())
       )
-      .map((r) => ({
-        name: r.display || r.ingredient,
+      .map((row) => ({
+        name: row.display || row.ingredient || row.label || row.match_raw_name,
         lens: 'compound',
-        reason: `shared compounds · ${r.weight}`,
+        reason: row.shared_count
+          ? `${row.shared_count} shared compounds`
+          : `shared compounds · ${row.weight}`,
         meta: {
-          weight: r.weight,
-          confidence: r.confidence,
-          network: r.ingredient,
+          weight: row.weight,
+          confidence: row.confidence,
+          shared_count: row.shared_count,
+          network: row.ingredient || row.match_raw_name,
           engaged: false,
           hits: 0,
         },

@@ -13,6 +13,12 @@ vi.mock('../api.js', () => ({
   techniques: vi.fn(),
 }))
 
+vi.mock('../lib/traditionDb.js', () => ({
+  listRegionPicks: vi.fn(async () => []),
+  matchTraditionRegion: vi.fn(async () => null),
+  bestTraditionMatches: vi.fn(async () => []),
+}))
+
 vi.mock('../lib/runAgent.js', () => ({
   runChat: (...args) => runChat(...args),
   runAgent: vi.fn(),

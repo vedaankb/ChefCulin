@@ -33,6 +33,7 @@ import {
   checkCompoundAnchors,
   checkFormSchemaLive,
   checkHealth,
+  checkVcfCompoundAnchors,
   formatReport,
 } from './reliability/checks.js'
 import { makeTraditionDbNode } from './reliability/traditionNode.js'
@@ -91,6 +92,10 @@ describe.skipIf(!apiLive)('reliability — live artifact API', () => {
 
   it('compound neighbors match flavor-network anchors', async () => {
     for (const r of await checkCompoundAnchors(api)) record(r)
+  })
+
+  it('VCF compound pairs match roasted / member-scoped anchors', async () => {
+    for (const r of await checkVcfCompoundAnchors(api)) record(r)
   })
 
   it('corpus NPMI neighbors match RecipeNLG anchors', async () => {

@@ -14,7 +14,20 @@ from culin_etl.compound_network import index_neighbors, top_compound_neighbors
 from culin_etl.lookup import index_cooccur, index_techniques, top_cooccur, top_techniques
 from culin_etl.normalize import canonicalize
 from culin_etl.palate import PalateStore, get_database_url
-from culin_etl.vcf_serve import DEFAULT_VCF, empty_vcf_tables, load_vcf_tables
+from culin_etl.health_serve import (
+    diseases_for_ingredient,
+    empty_health_tables,
+    ingredients_for_condition,
+    load_health_tables,
+    search_icd10cm,
+)
+from culin_etl.vcf_serve import (
+    DEFAULT_VCF,
+    dominant_bucket_for_product,
+    empty_vcf_tables,
+    enrich_pair_row,
+    load_vcf_tables,
+)
 
 DEFAULT_ARTIFACTS = Path(__file__).resolve().parents[1] / "artifacts" / "corpus"
 DEFAULT_COMPOUND = Path(__file__).resolve().parents[1] / "artifacts" / "compound"
@@ -72,6 +85,7 @@ def create_app(
     palate_store: Optional[PalateStore] = None,
     vcf: Optional[dict] = None,
     vcf_dir: Optional[Path] = None,
+    health_tables: Optional[dict] = None,
 ) -> FastAPI:
     """
     Serve precomputed cooccur/technique tables + Palate Memory.
@@ -107,6 +121,14 @@ def create_app(
         vroot = Path(vcf_dir or os.environ.get("CULIN_VCF", DEFAULT_VCF))
         vcf = load_vcf_tables(vroot) if (vroot / "spine.jsonl").exists() else empty_vcf_tables(vroot)
 
+    if health_tables is None:
+        hroot = Path(vcf_dir or os.environ.get("CULIN_VCF", DEFAULT_VCF))
+        health_tables = (
+            load_health_tables(hroot)
+            if (hroot / "compound_disease.jsonl").exists()
+            else empty_health_tables(hroot)
+        )
+
     co_idx = index_cooccur(artifacts["cooccur"])
     tech_idx = index_techniques(artifacts["ingredient_technique"])
     compound_idx = index_neighbors(compound["neighbors"])
@@ -128,7 +150,13 @@ def create_app(
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "*"],
+        allow_origins=[
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:5174",
+            "http://127.0.0.1:5174",
+            "*",
+        ],
         allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["*"],
     )
@@ -152,6 +180,8 @@ def create_app(
             "compound_source": COMPOUND_SOURCE,
             "vcf_artifacts": vcf.get("_dir"),
             "vcf": vcf.get("counts"),
+            "health_artifacts": health_tables.get("_dir"),
+            "health": health_tables.get("counts"),
         }
 
     @app.get("/meta")
@@ -176,17 +206,48 @@ def create_app(
     def compound_neighbors(
         ingredient: str = Query(..., description="Focus ingredient (Foodb or common name)"),
         n: int = Query(24, ge=1, le=100),
+        spine_id: Optional[str] = Query(None, description="When compound_source=pairs, optional spine id"),
+        product_id: Optional[int] = Query(None, description="When compound_source=pairs, preferred product id"),
     ):
-        canon, results = top_compound_neighbors(
-            compound["neighbors"],
-            ingredient,
-            n=n,
-            index=compound_idx,
-        )
+        """
+        Compound lens dispatcher. CULIN_COMPOUND_SOURCE chooses the table:
+
+          pairs           — VCF shared-compound neighbours (default)
+          flavor_network  — vendored Ahn/FooDB edge-weight projection
+        """
+        if COMPOUND_SOURCE == "flavor_network":
+            canon, results = top_compound_neighbors(
+                compound["neighbors"],
+                ingredient,
+                n=n,
+                index=compound_idx,
+            )
+            return {
+                "ingredient": ingredient,
+                "canonical": canon,
+                "source": "flavor_network",
+                "results": results,
+            }
+
+        # VCF path — prefer product_id (member), then spine_id, else empty.
+        rows: list[dict] = []
+        scope = "none"
+        if product_id is not None:
+            rows = list(vcf["pairs_by_product"].get(product_id, [])[:n])
+            scope = "product"
+        elif spine_id:
+            rows = list(vcf["pairs_by_spine"].get(spine_id, [])[:n])
+            scope = "spine"
+        enriched = [enrich_pair_row(r, vcf) for r in rows]
         return {
             "ingredient": ingredient,
-            "canonical": canon,
-            "results": results,
+            "canonical": ingredient.strip().lower(),
+            "source": "pairs",
+            "scope": scope,
+            "spine_id": spine_id,
+            "product_id": product_id,
+            "count": len(enriched),
+            "results": enriched,
         }
 
     @app.get("/techniques")
@@ -272,21 +333,47 @@ def create_app(
 
     @app.get("/vcf/pairs")
     def vcf_pairs(
-        spine_id: str = Query(..., description="anchor spine id, e.g. culin:coffee"),
+        spine_id: Optional[str] = Query(None, description="anchor spine id, e.g. culin:coffee"),
+        product_id: Optional[int] = Query(None, description="anchor vcf_product_id (member-level)"),
         n: int = Query(24, ge=1, le=200),
+        same_source_only: bool = Query(
+            False,
+            description="Drop neighbours whose profile_source differs from the anchor",
+        ),
     ):
         """
-        Shared-compound neighbours for one spine entry.
+        Shared-compound neighbours for one spine entry or one product member.
+
+        Prefer product_id when the chef has already disambiguated (garlic inside
+        culin:leek). Spine-level merges every culinary member and is only correct
+        for policy=single entries.
 
         Returns the compounds, not just the score: a chef cannot verify 0.211,
         but "they share pyrroles and pyrazines" is evidence they can act on.
         """
-        rows = vcf["pairs_by_spine"].get(spine_id, [])[:n]
+        if product_id is None and not spine_id:
+            raise HTTPException(status_code=400, detail="spine_id or product_id required")
+
+        if product_id is not None:
+            raw = list(vcf["pairs_by_product"].get(product_id, [])[: n * 2])
+            scope = "product"
+        else:
+            raw = list(vcf["pairs_by_spine"].get(spine_id, [])[: n * 2])
+            scope = "spine"
+
+        enriched = [enrich_pair_row(r, vcf) for r in raw]
+        if same_source_only:
+            enriched = [r for r in enriched if not r.get("mixed_profile_source")]
+        enriched = enriched[:n]
+        mixed = sum(1 for r in enriched if r.get("mixed_profile_source"))
         return {
-            "spine_id": spine_id,
+            "spine_id": spine_id or (vcf["member_to_spine"].get(product_id) if product_id is not None else None),
+            "product_id": product_id,
+            "scope": scope,
             "source": "pairs",
-            "count": len(rows),
-            "results": rows,
+            "count": len(enriched),
+            "mixed_profile_source_count": mixed,
+            "results": enriched,
         }
 
     @app.get("/vcf/forms")
@@ -355,9 +442,136 @@ def create_app(
             "results": out,
         }
 
+    @app.get("/vcf/phase/dish")
+    def vcf_phase_dish(
+        product_ids: str = Query(..., description="comma-separated vcf_product_id list for the plate"),
+    ):
+        """
+        Dish-level phase frames. Pair competition cannot fire these — they key on
+        dominant_bucket across the whole plate.
+
+        water_phase_dispersion_timing fires when any plate product is water-phase
+        dominant. fat_phase_long_infusion_volatility_split stays dormant while
+        volatility claims are suppressed (boiling-point coverage < 0.5).
+        smoked_product_fat_phase stays pending_authoring.
+        """
+        ids: list[int] = []
+        for part in product_ids.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                ids.append(int(part))
+            except ValueError:
+                continue
+        frames = {f["frame_id"]: f for f in vcf["phase_frames"]}
+        volatility_suppressed = bool(
+            ((vcf.get("meta") or {}).get("volatility") or {}).get("volatility_claims_suppressed")
+        )
+
+        components = []
+        for pid in ids:
+            profile = (vcf.get("profiles_by_id") or {}).get(pid) or {}
+            bucket = dominant_bucket_for_product(pid, vcf)
+            components.append(
+                {
+                    "product_id": pid,
+                    "raw_name": profile.get("raw_name"),
+                    "dominant_bucket": bucket,
+                    "profile_source": profile.get("profile_source"),
+                }
+            )
+
+        results = []
+        water = frames.get("water_phase_dispersion_timing")
+        if water and not water.get("pending_authoring") and water.get("sentence"):
+            water_hits = [c for c in components if c.get("dominant_bucket") == "water_phase"]
+            if water_hits:
+                results.append(
+                    {
+                        "frame_id": "water_phase_dispersion_timing",
+                        "render_mode": "framed",
+                        "sentence": water["sentence"],
+                        "scope": "dish",
+                        "components": water_hits,
+                    }
+                )
+
+        fat_infusion = frames.get("fat_phase_long_infusion_volatility_split")
+        if (
+            fat_infusion
+            and not fat_infusion.get("pending_authoring")
+            and fat_infusion.get("sentence")
+            and not volatility_suppressed
+        ):
+            fat_hits = [c for c in components if c.get("dominant_bucket") == "fat_phase"]
+            if fat_hits:
+                results.append(
+                    {
+                        "frame_id": "fat_phase_long_infusion_volatility_split",
+                        "render_mode": "framed",
+                        "sentence": fat_infusion["sentence"],
+                        "scope": "dish",
+                        "components": fat_hits,
+                    }
+                )
+
+        return {
+            "product_ids": ids,
+            "components": components,
+            "volatility_claims_suppressed": volatility_suppressed,
+            "count": len(results),
+            "results": results,
+        }
+
     @app.get("/vcf/meta")
     def vcf_meta():
         return {"counts": vcf.get("counts"), "dir": vcf.get("_dir"), "meta": vcf.get("meta") or {}}
+
+    # -------------------------------------------------------- Health / ICD --
+
+    @app.get("/icd/search")
+    def icd_search(
+        q: str = Query(..., description="ICD-10-CM search term (code or name)"),
+        n: int = Query(20, ge=1, le=50),
+    ):
+        """Proxy NLM Clinical Tables ICD-10-CM search for the Riverside Health lens."""
+        import httpx
+
+        try:
+            results = search_icd10cm(q, max_results=n)
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"NLM ICD search failed: {exc}") from exc
+        return {"query": q, "count": len(results), "results": results}
+
+    @app.get("/health/diseases")
+    def health_diseases(
+        ingredient: str = Query(..., description="Culinary ingredient / VCF product name"),
+        n: int = Query(40, ge=1, le=100),
+    ):
+        """MeSH disease associations for compounds in an ingredient profile."""
+        return diseases_for_ingredient(health_tables, ingredient, n=n)
+
+    @app.get("/health/by-condition")
+    def health_by_condition(
+        name: str = Query(..., description="ICD condition name (or free-text)"),
+        code: Optional[str] = Query(None, description="Optional ICD-10-CM code"),
+        n: int = Query(24, ge=1, le=100),
+        exclude: Optional[str] = Query(
+            None, description="Comma-separated ingredient names already on the plate"
+        ),
+    ):
+        """
+        ICD/condition → MeSH name-match → compounds → culinary ingredients.
+
+        Matching is token overlap on disease names (v1). Not a curated crosswalk.
+        """
+        exclude_set = set()
+        if exclude:
+            exclude_set = {p.strip() for p in exclude.split(",") if p.strip()}
+        return ingredients_for_condition(
+            health_tables, name=name, code=code, n=n, exclude=exclude_set
+        )
 
     def _require_store() -> PalateStore:
         if store is None:

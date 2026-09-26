@@ -12,7 +12,7 @@
  * not interchangeable, and a chef who typed "garlic" has already disambiguated;
  * handing back the cluster and asking them to choose again is wrong.
  */
-import SPINE from '../data/spine.json'
+import SPINE from '../data/spine.json' with { type: 'json' }
 
 /** Match tiers, in the order they are tried. Exposed for tests and disclosure. */
 export const MATCH_ORDER = ['member', 'entry', 'alias', 'loose']

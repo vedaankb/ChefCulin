@@ -21,11 +21,13 @@ describe('traditionDb (sql.js smoke)', () => {
     db = new SQL.Database(filebuffer)
   })
 
-  it('opens use_records with expected scale', () => {
-    const [{ c }] = db.exec('SELECT COUNT(*) AS c FROM use_records')[0].values.map(([c]) => ({
-      c,
-    }))
-    expect(c).toBe(316)
+  it('opens active use_records at demo_9 scale', () => {
+    const total = db.exec('SELECT COUNT(*) AS c FROM use_records')[0].values[0][0]
+    const active = db.exec(
+      "SELECT COUNT(*) AS c FROM use_records WHERE COALESCE(canon_status, 'active') = 'active'"
+    )[0].values[0][0]
+    expect(total).toBe(502)
+    expect(active).toBe(486)
   })
 
   it('searchDishes-shaped query returns Sichuan-ish chicken rows when keyword matches', () => {
@@ -81,6 +83,89 @@ describe('traditionDb (sql.js smoke)', () => {
     }
     stmt.free()
     expect(rows.length).toBeGreaterThan(0)
+  })
+
+  it('olive focus hits fruit dishes, not aioli cooked in oil', () => {
+    // Mirrors tokenWhereClause companion arm: role gate + oil-medium exclusion.
+    const stmt = db.prepare(`
+      SELECT DISTINCT ur.item
+      FROM use_records ur
+      JOIN companion_ingredients ci ON ci.dish_id = ur.dish_id
+      WHERE COALESCE(ur.canon_status, 'active') = 'active'
+        AND LOWER(ci.ingredient_name) LIKE ?
+        AND LOWER(COALESCE(ci.role_in_dish,'')) IN ('main','seasoning','aromatic','ingredient')
+        AND (? LIKE '%oil%' OR (
+          LOWER(COALESCE(ci.ingredient_name,'')) NOT LIKE '% oil%'
+          AND LOWER(COALESCE(ci.ingredient_name,'')) NOT LIKE '%oil %'
+          AND LOWER(COALESCE(ci.ingredient_name,'')) NOT LIKE 'oil%'
+        ))
+      ORDER BY ur.item
+    `)
+    stmt.bind(['%olive%', 'olive'])
+    const items = []
+    while (stmt.step()) items.push(stmt.get()[0])
+    stmt.free()
+    expect(items).toEqual(expect.arrayContaining(["Olive all'ascolana", 'Oliva Ascolana del Piceno']))
+    expect(items).not.toContain('Aioli')
+    expect(items).not.toContain('Baba ghanoush')
+    expect(items).not.toContain('Bouillabaisse')
+    expect(items).not.toContain('Caesar salad')
+    expect(items).not.toContain('Fava (Santorini split-pea puree)')
+  })
+
+  it('olive oil focus hits fat-medium dishes, not olive fruit alone', () => {
+    const roles = ['main', 'seasoning', 'aromatic', 'ingredient', 'fat']
+    const placeholders = roles.map(() => '?').join(', ')
+    const stmt = db.prepare(`
+      SELECT DISTINCT ur.item
+      FROM use_records ur
+      JOIN companion_ingredients ci ON ci.dish_id = ur.dish_id
+      WHERE COALESCE(ur.canon_status, 'active') = 'active'
+        AND LOWER(ci.ingredient_name) LIKE ?
+        AND LOWER(COALESCE(ci.role_in_dish,'')) IN (${placeholders})
+        AND (? LIKE '%oil%' OR (
+          LOWER(COALESCE(ci.ingredient_name,'')) NOT LIKE '% oil%'
+          AND LOWER(COALESCE(ci.ingredient_name,'')) NOT LIKE '%oil %'
+          AND LOWER(COALESCE(ci.ingredient_name,'')) NOT LIKE 'oil%'
+        ))
+      ORDER BY ur.item
+    `)
+    stmt.bind(['%olive oil%', ...roles, 'olive oil'])
+    const items = []
+    while (stmt.step()) items.push(stmt.get()[0])
+    stmt.free()
+    expect(items.length).toBeGreaterThan(5)
+    expect(items).toEqual(expect.arrayContaining(['Bouillabaisse', 'Ful medames']))
+    // Fruit-only olive dishes (no oil companion) stay out.
+    expect(items).not.toContain("Olive all'ascolana")
+  })
+})
+
+describe('fat / oil medium focus helpers', () => {
+  it('flags oil carriers without inventing ingredient rows', async () => {
+    const { isOilMediumName, isFatMediumFocus, rolesForFocus, focusSearchTokens } = await import(
+      './traditionDb.js'
+    )
+    expect(isOilMediumName('olive oil')).toBe(true)
+    expect(isOilMediumName('extra virgin olive oil')).toBe(true)
+    expect(isOilMediumName('black olives')).toBe(false)
+    expect(isOilMediumName('olives')).toBe(false)
+
+    expect(isFatMediumFocus('olive oil')).toBe(true)
+    expect(isFatMediumFocus('butter')).toBe(true)
+    expect(isFatMediumFocus('ghee')).toBe(true)
+    expect(isFatMediumFocus('olive')).toBe(false)
+    expect(isFatMediumFocus('garlic')).toBe(false)
+
+    expect(rolesForFocus('olive')).not.toContain('fat')
+    expect(rolesForFocus('olive oil')).toContain('fat')
+    expect(rolesForFocus('butter')).toContain('fat')
+
+    expect(focusSearchTokens('olive oil')).toEqual(['olive oil'])
+    expect(focusSearchTokens('olive oil')).not.toContain('olive')
+    expect(focusSearchTokens('olive oil')).not.toContain('oil')
+    expect(focusSearchTokens('olive')).toContain('olive')
+    expect(focusSearchTokens('butter')).toEqual(expect.arrayContaining(['butter']))
   })
 })
 

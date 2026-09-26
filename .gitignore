@@ -40,9 +40,19 @@ pipeline/artifacts/vcf/form_diffs.jsonl
 
 # 2026-08-30: src/full_dataset.csv is 166.5MB — over GitHub's HARD 100MB
 # per-file cap, a push containing it is rejected outright, not just warned.
-# Excluded pending a decision: Git LFS, or confirmation this is regenerable
-# and doesn't need to be tracked at all. Flagged to James, not yet resolved.
+# Local-only (symlink or real file). Never commit the blob.
 src/full_dataset.csv
+
+# Local demo zip extract scratch; never commit
+.demo_import/
+
+# Riverside Vite build output (root `dist` already ignored; keep explicit)
+riverside/dist/
+
+# Founder dump zips — extract needed artifacts only; never commit the archive
+/ChefCulin*.zip
+/*.zip
+/Latest_Demo.zip
 
 # Vite build cruft, should never have been sitting in the working tree
 vite.config.js.timestamp-*.mjs

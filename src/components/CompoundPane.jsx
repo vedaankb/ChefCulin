@@ -15,12 +15,97 @@ function neighborLabel(raw) {
     .replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
+function culinaryMembers(resolution) {
+  const members = resolution?.entry?.members || []
+  return members.filter((m) => m.class === 'culinary')
+}
+
+/**
+ * Fetch strategy from resolution policy (§2.1 / §2.3).
+ * Member-level match always uses that product — even on a category entry —
+ * because the chef already disambiguated.
+ */
+async function fetchPairRows(resolution) {
+  const policy = resolution.policy || 'single'
+  const memberMatched = resolution.matched_on === 'member'
+
+  if (memberMatched || policy === 'single' || !policy) {
+    const res = await api.vcfPairs({
+      productId: resolution.member_id,
+      spineId: resolution.spine_id,
+      n: 24,
+    })
+    return {
+      mode: 'member',
+      rows: res.results || [],
+      mixed: res.mixed_profile_source_count || 0,
+      range: null,
+      members: null,
+    }
+  }
+
+  if (policy === 'category' && !memberMatched) {
+    return {
+      mode: 'choose',
+      rows: [],
+      mixed: 0,
+      range: null,
+      members: culinaryMembers(resolution),
+    }
+  }
+
+  // expand — per culinary member, report the shared_count range, merge unique neighbours.
+  const members = culinaryMembers(resolution)
+  const responses = await Promise.all(
+    members.map((m) =>
+      api.vcfPairs({ productId: m.id, spineId: resolution.spine_id, n: 16 }).catch(() => null)
+    )
+  )
+  const byMatch = new Map()
+  const counts = []
+  let mixed = 0
+  responses.forEach((res, i) => {
+    if (!res?.results?.length) return
+    counts.push({
+      member: members[i].display || members[i].raw_name,
+      topShared: res.results[0]?.shared_count || 0,
+      n: res.results.length,
+    })
+    mixed += res.mixed_profile_source_count || 0
+    for (const row of res.results) {
+      const key = row.match_vcf_product_id
+      const prev = byMatch.get(key)
+      if (!prev || (row.shared_count || 0) > (prev.shared_count || 0)) {
+        byMatch.set(key, {
+          ...row,
+          expand_from: members[i].display || members[i].raw_name,
+        })
+      }
+    }
+  })
+  const rows = [...byMatch.values()].sort((a, b) => (b.shared_count || 0) - (a.shared_count || 0))
+  const sharedVals = counts.map((c) => c.topShared).filter((n) => n > 0)
+  const range =
+    sharedVals.length > 1
+      ? { min: Math.min(...sharedVals), max: Math.max(...sharedVals), members: counts }
+      : null
+  return { mode: 'expand', rows: rows.slice(0, 24), mixed, range, members }
+}
+
 export default function CompoundPane() {
   const { dish, cuisineScope, overlayNote, form, focusIngredient } = useWorkspace()
   const [status, setStatus] = useState({ kind: 'loading', text: 'Loading compound layer…' })
   const [resolution, setResolution] = useState(null)
   const [rows, setRows] = useState([])
   const [openRow, setOpenRow] = useState(null)
+  const [range, setRange] = useState(null)
+  const [chooseMembers, setChooseMembers] = useState(null)
+  const [mixedCount, setMixedCount] = useState(0)
+  const [memberOverride, setMemberOverride] = useState(null)
+
+  useEffect(() => {
+    setMemberOverride(null)
+  }, [focusIngredient, dish])
 
   useEffect(() => {
     const display = plateSeed(dish, focusIngredient)
@@ -31,20 +116,33 @@ export default function CompoundPane() {
       })
       setRows([])
       setResolution(null)
+      setRange(null)
+      setChooseMembers(null)
       return
     }
 
-    // Resolution happens here, deterministically, before anything is fetched —
-    // never inside the request. See src/lib/spineResolve.js.
     const r = resolveIngredient(display)
-    setResolution(r)
+    const active =
+      memberOverride && r.state === 'resolved'
+        ? {
+            ...r,
+            member_id: memberOverride.id,
+            spine_member: memberOverride.raw_name,
+            display: memberOverride.display || memberOverride.raw_name,
+            matched_on: 'member',
+            policy: r.policy,
+          }
+        : r
+    setResolution(active)
 
-    if (r.state !== 'resolved') {
+    if (active.state !== 'resolved') {
       setRows([])
+      setRange(null)
+      setChooseMembers(null)
       setStatus({
         kind: 'empty',
         text:
-          r.state === 'ambiguous'
+          active.state === 'ambiguous'
             ? `“${display}” names more than one ingredient in the compound corpus — pick one.`
             : `No VCF compound data for “${display}”.`,
       })
@@ -52,25 +150,41 @@ export default function CompoundPane() {
     }
 
     let cancelled = false
-    setStatus({ kind: 'loading', text: `Loading shared compounds for ${r.display}…` })
+    setStatus({ kind: 'loading', text: `Loading shared compounds for ${active.display}…` })
     ;(async () => {
       try {
-        const res = await api.vcfPairs(r.spine_id, 24)
+        const fetched = await fetchPairRows(active)
         if (cancelled) return
+        if (fetched.mode === 'choose') {
+          setRows([])
+          setRange(null)
+          setChooseMembers(fetched.members || [])
+          setMixedCount(0)
+          setStatus({
+            kind: 'empty',
+            text: `“${active.display}” is a category — pick which member to read compounds for.`,
+          })
+          return
+        }
         const inDish = new Set(dish.map((d) => d.name.toLowerCase()))
-        const kept = (res.results || [])
+        const kept = (fetched.rows || [])
           .map((row) => ({ ...row, label: neighborLabel(row.match_raw_name) }))
           .filter((row) => !inDish.has(row.label.toLowerCase()))
         setRows(kept)
+        setRange(fetched.range)
+        setChooseMembers(null)
+        setMixedCount(fetched.mixed || 0)
         setStatus({
           kind: kept.length ? 'ok' : 'empty',
           text: kept.length
-            ? `${kept.length} ingredient${kept.length === 1 ? '' : 's'} share volatile compounds with ${r.display}`
-            : `No shared-compound neighbours for ${r.display}`,
+            ? `${kept.length} ingredient${kept.length === 1 ? '' : 's'} share volatile compounds with ${active.display}`
+            : `No shared-compound neighbours for ${active.display}`,
         })
       } catch (err) {
         if (cancelled) return
         setRows([])
+        setRange(null)
+        setChooseMembers(null)
         setStatus({
           kind: 'err',
           text: `Compound API unreachable. Start: npm run api — ${err.message || err}`,
@@ -80,7 +194,7 @@ export default function CompoundPane() {
     return () => {
       cancelled = true
     }
-  }, [dish, focusIngredient])
+  }, [dish, focusIngredient, memberOverride])
 
   return (
     <section className="pane pane-c on">
@@ -104,15 +218,53 @@ export default function CompoundPane() {
         match — the evidence, not a similarity number.
       </p>
 
-      {/* §2.7 disclosure — every lens states what it read from. */}
       <div className="lens-source">
         <span className="ls-lbl">Source</span>
         Volatile Compounds in Food (VCF), licensed. Shared-compound counts weighted by how rare
         each compound is across the corpus.
         {resolution?.state === 'resolved' && (
-          <> Resolved “{resolution.query}” → {resolution.spine_member} via {resolution.matched_on} match.</>
+          <>
+            {' '}
+            Resolved “{resolution.query}” → {resolution.spine_member}
+            {resolution.member_id != null ? ` (#${resolution.member_id})` : ''} via{' '}
+            {resolution.matched_on} match
+            {resolution.policy ? ` · policy ${resolution.policy}` : ''}.
+          </>
+        )}
+        {mixedCount > 0 && (
+          <>
+            {' '}
+            {mixedCount} neighbour{mixedCount === 1 ? '' : 's'} compare profiles from different
+            sources — treat those ranks as provisional.
+          </>
         )}
       </div>
+
+      {range && (
+        <div className="scope-lens-note">
+          <span className="sn-lbl">Expand policy · range</span>
+          Across {range.members.length} culinary members, top shared-compound counts run{' '}
+          {range.min}–{range.max}. Showing the union of neighbours, strongest first.
+        </div>
+      )}
+
+      {chooseMembers?.length > 0 && (
+        <div className="group">
+          <div className="g-label">Pick a member</div>
+          <div className="chips">
+            {chooseMembers.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                className="mini"
+                onClick={() => setMemberOverride(m)}
+              >
+                {m.display || m.raw_name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {cuisineScope && (
         <div className="scope-lens-note">
@@ -143,6 +295,9 @@ export default function CompoundPane() {
                 <div className="cr-head">
                   <Chip name={row.label} lens="compound" />
                   <span className="cr-shared">{row.shared_count} shared compounds</span>
+                  {row.mixed_profile_source && (
+                    <span className="chip-meta">mixed profile source</span>
+                  )}
                 </div>
                 {sentence && <div className="cr-why">{sentence}.</div>}
                 <button
@@ -169,6 +324,7 @@ export default function CompoundPane() {
                           {c.raw_compound}
                           <span className="chip-meta">
                             {c.compound_group} · in {c.df_culinary} corpus ingredients
+                            {c.descriptors?.length ? ` · ${c.descriptors[0]}` : ''}
                           </span>
                         </li>
                       ))}

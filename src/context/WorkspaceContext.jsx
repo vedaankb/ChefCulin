@@ -19,19 +19,30 @@ You help arrange and think about ingredients the chef has already gathered. You 
 Be concise, concrete, and honest. Prefer short paragraphs. If the dish is empty, say so and invite them to gather from the lenses first.
 Current plate context is provided in the latest user turn when available.`
 
+const RIVERSIDE_BRAINSTORM_SYSTEM = `You are CulinAI for a clinical nutrition brainstorm workspace (Riverside Health).
+You help clinicians and care teams explore food ideas in light of ICD-coded conditions and chemistry evidence. You never prescribe treatment or claim medical outcomes. Frame chemistry↔disease links as corpus evidence (MeSH / FoodAtlas), not clinical proof.
+Be concise and concrete. Prefer options and questions over directives. When ICD conditions are listed in context, keep them in view while talking about the plate.
+Current plate and condition context is provided in the latest user turn when available.`
+
 const WorkspaceContext = createContext(null)
 
-export function WorkspaceProvider({ children, initialFocus = null }) {
+export function WorkspaceProvider({
+  children,
+  initialFocus = null,
+  initialLens = 'c',
+  variant = 'nestle',
+}) {
   const [dish, setDish] = useState([])
   const [dishName, setDishName] = useState('')
   const [form, setForm] = useState(null)
   const [focusIngredient, setFocusIngredient] = useState(initialFocus)
   const [cuisineScope, setCuisineScope] = useState(null)
-  const [activeLens, setActiveLens] = useState('c')
+  const [activeLens, setActiveLens] = useState(initialLens)
   const [openIdx, setOpenIdx] = useState(null)
   const [openWhy, setOpenWhy] = useState(() => new Set())
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false)
   const [chat, setChat] = useState([])
+  const [diagnosticCodes, setDiagnosticCodes] = useState([])
   const [regionPicks, setRegionPicks] = useState([])
   const [formCatalog, setFormCatalog] = useState({
     loading: false,
@@ -510,13 +521,28 @@ export function WorkspaceProvider({ children, initialFocus = null }) {
           }.`
         : `Designing around ${focusIngredient}. Plate is empty — nothing gathered yet.`
 
+      const conditions =
+        diagnosticCodes.length > 0
+          ? ` ICD conditions in scope: ${diagnosticCodes
+              .map((c) => `${c.name}${c.code ? ` (${c.code})` : ''}`)
+              .join('; ')}.`
+          : ''
+
+      const system =
+        variant === 'riverside' ? RIVERSIDE_BRAINSTORM_SYSTEM : BRAINSTORM_SYSTEM
+
       ;(async () => {
         try {
           const reply = await runChat({
-            system: BRAINSTORM_SYSTEM,
+            system,
             messages: [
               ...history,
-              { role: 'user', content: `${plate}\n\nChef: ${text}` },
+              {
+                role: 'user',
+                content: `${plate}${conditions}\n\n${
+                  variant === 'riverside' ? 'User' : 'Chef'
+                }: ${text}`,
+              },
             ],
           })
           push('sys', { type: 'text', text: reply })
@@ -533,7 +559,7 @@ export function WorkspaceProvider({ children, initialFocus = null }) {
         }
       })()
     },
-    [chat, cuisineScope, dish, focusIngredient, form, push, respond]
+    [chat, cuisineScope, diagnosticCodes, dish, focusIngredient, form, push, respond, variant]
   )
 
   const tensionFor = useCallback(
@@ -573,6 +599,9 @@ export function WorkspaceProvider({ children, initialFocus = null }) {
     scopeMenuOpen,
     setScopeMenuOpen,
     chat,
+    diagnosticCodes,
+    setDiagnosticCodes,
+    variant,
     balance,
     balanceDecisions,
     recordBalanceDecision,

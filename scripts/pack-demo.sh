@@ -29,6 +29,13 @@ echo "== Packing founder demo zip =="
 echo "Includes FooDB data (~1.8 GB uncompressed) and .env (OpenAI key)."
 echo "Compression may take 5–15 minutes."
 
+# Refuse to ship if Form's local artifact is missing (gitignored but required to demo).
+if [[ ! -f "$ROOT/pipeline/artifacts/vcf/form_diffs.jsonl" ]]; then
+  echo "Missing pipeline/artifacts/vcf/form_diffs.jsonl — Form lens will be empty."
+  echo "Restore from the founder VCF dump (.gz → form_diffs.jsonl) before packing."
+  exit 1
+fi
+
 cd "$PARENT"
 zip -r -q "$ROOT/$ARCHIVE" "$BASE" \
   -x "${BASE}/node_modules/*" \
@@ -39,6 +46,9 @@ zip -r -q "$ROOT/$ARCHIVE" "$BASE" \
   -x "${BASE}/.git/**" \
   -x "${BASE}/dist/*" \
   -x "${BASE}/dist/**" \
+  -x "${BASE}/ChefCulin*.zip" \
+  -x "${BASE}/*.zip" \
+  -x "${BASE}/tradition_dishes_demo_9.xlsx" \
   -x "${BASE}/**/.DS_Store" \
   -x "${BASE}/.DS_Store"
 

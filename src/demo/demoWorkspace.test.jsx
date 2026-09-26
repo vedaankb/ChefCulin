@@ -24,10 +24,13 @@ const api = vi.hoisted(() => ({
       { ingredient: 'salt', confidence: 0.9, freq: 2000 },
     ],
   })),
-  vcfPairs: vi.fn(async () => ({
-    spine_id: 'culin:coffee',
+  vcfPairs: vi.fn(async (opts = {}) => ({
+    spine_id: opts.spineId || 'culin:coffee',
+    product_id: opts.productId || 157,
+    scope: opts.productId != null ? 'product' : 'spine',
     source: 'pairs',
     count: 2,
+    mixed_profile_source_count: 0,
     results: [
       {
         match_vcf_product_id: 400,
@@ -53,6 +56,7 @@ const api = vi.hoisted(() => ({
   })),
   vcfForms: vi.fn(async () => ({ spine_id: 'culin:coffee', coverage: 'single_form', count: 0, results: [] })),
   vcfPhase: vi.fn(async () => ({ product_id: 0, count: 0, n_framed: 0, results: [] })),
+  vcfPhaseDish: vi.fn(async () => ({ product_ids: [], count: 0, results: [] })),
   compound: vi.fn(async (seed) => ({
     canonical: 'chicken',
     results: [
@@ -273,8 +277,9 @@ describe('demo Compound lens', () => {
     expect(screen.getAllByText(/shared volatile compounds/i).length).toBeGreaterThan(0)
     expect(await screen.findByText('Pork')).toBeTruthy()
     expect(api.vcfPairs).toHaveBeenCalled()
-    // Resolution happens before the fetch, so the API is asked for a spine id.
-    expect(api.vcfPairs.mock.calls[0][0]).toMatch(/^culin:/)
+    // Resolution happens before the fetch — member-scoped product id, not the cluster alone.
+    expect(api.vcfPairs.mock.calls[0][0].spineId).toMatch(/^culin:/)
+    expect(api.vcfPairs.mock.calls[0][0].productId).toEqual(expect.any(Number))
   })
 
   it('names compound families instead of the similarity score', async () => {
