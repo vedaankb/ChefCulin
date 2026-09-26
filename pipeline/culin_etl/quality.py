@@ -28,15 +28,3 @@ def _fingerprint(recipe: Recipe) -> tuple:
     return (ner, dirs)
 
 
-def dedupe_recipes(recipes: list[Recipe]) -> list[Recipe]:
-    seen: set[tuple] = set()
-    out: list[Recipe] = []
-    for r in recipes:
-        fp = _fingerprint(r)
-        if not fp[0] and not fp[1]:
-            continue
-        if fp in seen:
-            continue
-        seen.add(fp)
-        out.append(r)
-    return out

@@ -136,9 +136,6 @@ class TechniqueAccumulator:
         return edges
 
 
-def build_ingredient_technique(
-    recipe_rows: Iterable[dict],
-    min_freq: int = 1,
 ) -> list[dict]:
     acc = TechniqueAccumulator()
     for row in recipe_rows:
