@@ -624,6 +624,3 @@ def create_app(
     return app
 
 
-def app_factory() -> FastAPI:
-    """uvicorn entry: uvicorn culin_etl.api:app_factory --factory"""
-    return create_app()

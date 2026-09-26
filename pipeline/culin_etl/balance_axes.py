@@ -317,8 +317,3 @@ def build_foodb_balance_rows(
     return out_rows, meta
 
 
-def rows_to_lookup(rows: List[dict]) -> Dict[str, dict]:
-    by_name: Dict[str, dict] = {}
-    for row in rows:
-        by_name[row["name"].lower()] = row
-    return by_name

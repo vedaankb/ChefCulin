@@ -59,9 +59,6 @@ def finalize_cooccurrence(
     return edges
 
 
-def build_cooccurrence(
-    recipe_ingredient_lists: list[list[str]],
-    min_freq: int = 1,
 ) -> list[dict]:
     """
     Build undirected co-occurrence edges with freq + NPMI confidence.
