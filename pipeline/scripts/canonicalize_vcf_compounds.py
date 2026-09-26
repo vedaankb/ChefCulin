@@ -300,7 +300,8 @@ def load_crosswalk() -> dict[str, dict]:
     xw = pd.read_excel(CROSSWALK_XLSX)
     by_name: dict[str, list[dict]] = defaultdict(list)
     for row in xw.itertuples(index=False):
-        by_name[row.Name].append({"cas": row.CAS, "cid": int(row.CID)})
+        cid = None if pd.isna(row.CID) else int(row.CID)
+        by_name[row.Name].append({"cas": row.CAS, "cid": cid})
 
     lookup: dict[str, dict] = {}
     for name, candidates in by_name.items():
