@@ -8,7 +8,7 @@ import { expect } from 'vitest'
 import initSqlJs from 'sql.js'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '../..')
-export const TRADITION_DB_PATH = join(root, 'src/data/traditional_culinary_uses_database_v2.db')
+const TRADITION_DB_PATH = join(root, 'src/data/traditional_culinary_uses_database_v2.db')
 
 export function assertOptionShape(option, { requireScore = false } = {}) {
   expect(option).toEqual(

@@ -33,7 +33,7 @@ function readEnv(name) {
 }
 
 /** API key: VITE_OPENAI_API_KEY in dev; OPENAI_API_KEY for Vitest live runs. */
-export function openaiApiKey() {
+function openaiApiKey() {
   return readEnv('VITE_OPENAI_API_KEY') || readEnv('OPENAI_API_KEY')
 }
 
@@ -58,7 +58,7 @@ export async function proxyConfigured() {
   }
 }
 
-export function defaultModel() {
+function defaultModel() {
   return readEnv('VITE_OPENAI_MODEL') || readEnv('OPENAI_MODEL') || DEFAULT_MODEL
 }
 

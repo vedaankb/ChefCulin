@@ -13,7 +13,7 @@ for (const row of rows) {
 
 export const BALANCE_META = meta
 
-export function balanceProfileFor(name) {
+function balanceProfileFor(name) {
   if (!name) return null
   return byNameLower.get(String(name).toLowerCase()) || null
 }

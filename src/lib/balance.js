@@ -22,7 +22,7 @@ import { getFrame } from './frameRegistry.js'
 export const TREND_THRESHOLD = 0.4
 
 /** FooDB-normalised score at or above this counts as axis presence for trend flags. */
-export const AXIS_PRESENCE = 0.2
+const AXIS_PRESENCE = 0.2
 
 function axisPresence(value) {
   return (Number(value) || 0) >= AXIS_PRESENCE ? 1 : 0

@@ -148,7 +148,7 @@ export const DELIVERY = {
     ]
   };
 
-export const CLASS_DELIVERY = {
+const CLASS_DELIVERY = {
     liquid_alcohol: [   // wine, port, spirits
       {mode:'Reduced',       note:'Water and alcohol drive off; acid and sugar concentrate. Body and gloss arrive.', axAdd:{sweet:1}},
       {mode:'Deglazed into a pan', note:'Lifts the fond — the browned residue becomes part of the sauce. This is where the Maillard the sear built actually gets used.', axAdd:{glut:1}},
@@ -335,7 +335,7 @@ export function axesFor(name) {
   return axesFromFoodb(key)
 }
 
-export function classForIngredient(name) {
+function classForIngredient(name) {
   const key = String(name || '')
   const lower = key.toLowerCase()
   if (ING_CLASS[key]) return ING_CLASS[key]
